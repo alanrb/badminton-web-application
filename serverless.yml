@@ -1,0 +1,120 @@
+service: badminton-cms
+
+frameworkVersion: '3'
+useDotenv: true
+
+plugins:
+  - serverless-s3-sync
+
+custom:
+  # S3 sync plugin configuration
+  s3Sync:
+    - bucketName: ${param:webBucketName}
+      localDir: dist
+
+params:
+  default:
+    webBucketName: ${self:service}-${opt:stage, 'dev'}
+    deploymentBucket: gumball-serverless
+
+provider:
+  name: aws
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'ap-southeast-1'}
+  # https://github.com/serverless/serverless/issues/10815
+  deploymentMethod: direct
+  deploymentBucket:
+    name: ${param:deploymentBucket}
+    blockPublicAccess: true
+
+resources:
+  Resources:
+    WebAppBucket:
+      Type: 'AWS::S3::Bucket'
+      Properties:
+        BucketName: ${param:webBucketName}
+
+    WebCloufFrontOAC:
+      Type: 'AWS::CloudFront::OriginAccessControl'
+      Properties:
+        OriginAccessControlConfig:
+          Name: ${param:webBucketName}-oac
+          OriginAccessControlOriginType: s3
+          SigningBehavior: always
+          SigningProtocol: sigv4
+
+    WebAppBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      DependsOn:
+        - WebAppBucket
+      Properties:
+        Bucket:
+          Ref: WebAppBucket
+        PolicyDocument:
+          Statement:
+            - Sid: AllowCloudFrontServicePrincipal
+              Effect: Allow
+              Principal:
+                Service: cloudfront.amazonaws.com
+              Action:
+                - s3:GetObject
+              Resource: !Sub 'arn:aws:s3:::${WebAppBucket}/*'
+              Condition:
+                StringEquals:
+                  AWS:SourceArn: !Sub "arn:aws:cloudfront::${aws:accountId}:distribution/${CFDistribution}"
+
+    CFDistribution:
+      Type: 'AWS::CloudFront::Distribution'
+      DependsOn:
+        - WebAppBucket
+        - WebCloufFrontOAC
+      Properties:
+        DistributionConfig:
+          Enabled: true
+          Comment: 'CloudFront origin for ${param:webBucketName} S3 Bucket'
+          Origins:
+            - Id: WebApp
+              DomainName: !GetAtt WebAppBucket.RegionalDomainName
+              OriginPath: ''
+              OriginAccessControlId: !GetAtt WebCloufFrontOAC.Id
+              # This must be specified for now
+              S3OriginConfig:
+                OriginAccessIdentity: ''
+          DefaultCacheBehavior:
+            TargetOriginId: WebApp
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            Compress: true
+            ViewerProtocolPolicy: redirect-to-https
+            # Managed policy: CachingOptimized
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+            # Managed policy: SecurityHeadersPolicy
+            ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
+          HttpVersion: 'http2'
+          PriceClass: 'PriceClass_200'
+          # Below are webapp configurations
+          DefaultRootObject: index.html
+          
+          # Aliases: ${param:webDomains}
+          # ViewerCertificate: ${param:webCert}
+          
+          # Since the Single Page App is taking care of the routing we need to make sure ever path is served with index.html
+          # The only exception are files that actually exist e.h. app.js, reset.css
+          CustomErrorResponses:
+            - ErrorCode: 403
+              ResponseCode: 200
+              ResponsePagePath: /index.html
+            - ErrorCode: 404
+              ResponseCode: 200
+              ResponsePagePath: /index.html
+
+  Outputs:
+    CFDistributionDomainName:
+      Value:
+        'Fn::GetAtt': [CFDistribution, DomainName]
+    CFDistributionId:
+      Description: CloudFront distribution ID for invalidation
+      Value:
+        Ref: CFDistribution    
